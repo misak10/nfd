@@ -209,64 +209,6 @@ async function setCommands() {
   }
 }
 
-// 导出所需的处理函数
-export const handlers = {
-  async handleWebhook(request) {
-    try {
-      if (request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== SECRET) {
-        return new Response('Unauthorized', { status: 403 })
-      }
-
-      const update = await request.json()
-      await onUpdate(update)
-
-      return new Response('Ok')
-    } catch (error) {
-      console.error('Webhook Error:', error)
-      return new Response('Internal Server Error', { status: 500 })
-    }
-  },
-
-  async registerWebhook(request, url) {
-    try {
-      const webhookUrl = `${url.protocol}//${url.hostname}/endpoint`
-      const response = await fetch(`https://api.telegram.org/bot${ENV_BOT_TOKEN}/setWebhook`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: webhookUrl,
-          secret_token: ENV_BOT_SECRET,
-          max_connections: 100
-        })
-      })
-      
-      const result = await response.json()
-      return new Response(result.ok ? '✅ Webhook设置成功' : JSON.stringify(result, null, 2))
-    } catch (error) {
-      return new Response('❌ Webhook设置失败: ' + error.message)
-    }
-  },
-
-  async unRegisterWebhook(request) {
-    try {
-      const response = await fetch(`https://api.telegram.org/bot${ENV_BOT_TOKEN}/setWebhook`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url: '' })
-      })
-      
-      const result = await response.json()
-      return new Response(result.ok ? '✅ Webhook已移除' : JSON.stringify(result, null, 2))
-    } catch (error) {
-      return new Response('❌ Webhook移除失败: ' + error.message)
-    }
-  }
-}
-
 /**
  * Handle incoming Update
  */
@@ -525,25 +467,3 @@ async function isFraud(id){
 function sendPhoto(msg = {}) {
   return requestTelegram('sendPhoto', makeReqBody(msg))
 }
-
-// 导出所有处理函数
-module.exports = handlers;
-
-// 移除 addEventListener 部分，因为这部分在 worker-loader.js 中处理
-
-// 所有处理函数保持不变...
-// handleError, notifyAdmin, onUpdate, onMessage, handleAdminMessage, handleGuestMessage, 
-// handleNotify, handleBlock, handleUnBlock, checkBlock, handleKK, sendPlainText, isFraud, sendPhoto
-
-// 导出所需的函数供 worker-loader.js 使用
-globalThis.templates = templates
-globalThis.sendMessage = sendMessage
-globalThis.copyMessage = copyMessage
-globalThis.forwardMessage = forwardMessage
-globalThis.getChat = getChat
-globalThis.getUserProfilePhotos = getUserProfilePhotos
-globalThis.getFileUrl = getFileUrl
-globalThis.setCommands = setCommands
-globalThis.handleAdminMessage = handleAdminMessage
-globalThis.handleGuestMessage = handleGuestMessage
-globalThis.startMsgUrl = startMsgUrl
