@@ -226,12 +226,12 @@ async function onUpdate (update) {
  * Handle incoming Message
  */
 async function onMessage (message) {
+  console.log('Processing message:', message)
   try {
     if(message.text === '/start'){
       let startMsg
       if(message.chat.id.toString() === ADMIN_UID) {
         startMsg = await fetch(startMsgUrl.admin).then(r => r.text())
-        // 设置命令菜单
         await setCommands()
       } else {
         startMsg = await fetch(startMsgUrl.guest).then(r => r.text())
@@ -258,6 +258,7 @@ async function onMessage (message) {
 
     return handleGuestMessage(message)
   } catch (error) {
+    console.error('Message handling error:', error)
     return handleError(error, message.chat.id)
   }
 }
