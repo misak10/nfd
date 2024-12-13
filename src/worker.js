@@ -2,12 +2,7 @@ const TOKEN = ENV_BOT_TOKEN
 const WEBHOOK = '/endpoint'
 const SECRET = ENV_BOT_SECRET
 const ADMIN_UID = ENV_ADMIN_UID
-
 const NOTIFY_INTERVAL = 3600 * 1000;
-const startMsgUrl = {
-  admin: 'https://raw.githubusercontent.com/misak10/nfd/main/message/startMessage.md',
-  guest: 'https://raw.githubusercontent.com/misak10/nfd/main/message/startMessage_guest.md'
-}
 
 const commands = {
   admin: [
@@ -46,10 +41,11 @@ const templates = {
 <i>❗️注意: /block、/unblock、/checkblock、/kk 可以回复消息或直接输入用户ID</i>
 `,
 
-  userInfo: (user) => `📌 基本信息
+  userInfo: (user, isBlocked = false) => `📌 基本信息
 ┣ 昵称: <b>${user.first_name}${user.last_name ? ' ' + user.last_name : ''}</b>
 ┣ 用户名: ${user.username ? '@' + user.username : '未设置'}
-┗ ID: <code>${user.id}</code>
+┣ ID: <code>${user.id}</code>
+┗ 状态: ${isBlocked ? '🚫 已屏蔽' : '✅ 正常'}
 
 ⏰ 查询时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`,
 
@@ -111,7 +107,69 @@ ${users.map(user => `👤 昵称: <b>${user.first_name}${user.last_name ? ' ' + 
 🆔 ID: <code>${user.id}</code>`).join('\n\n')}
 
 ⏰ 发送时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
-`
+`,
+
+  startAdmin: () => `
+🌸 <b>Akikawa Bot 使用指南</b>
+━━━━━━━━━━━━━━━━
+
+📱 <b>主要功能</b>
+• 消息转发 - 自动转发用户消息给管理员
+• 快速回复 - 管理员可直接回复与用户对话
+• 安全监控 - 实时检测可疑用户并通知
+• 定时检查 - 每小时自动检查用户状态
+
+⚡️ <b>管理命令</b>
+命令支持两种使用方式:
+• 回复用户消息使用命令
+• 直接输入命令+用户ID (根据命令类型使用不同分隔符)
+
+📋 <b>基础命令</b>
+/help - 显示帮助信息
+/block - 屏蔽用户
+/unblock - 解除屏蔽
+/checkblock - 检查屏蔽状态
+/kk - 查看用户详情
+/info - 查看个人信息
+
+📨 <b>消息命令</b>
+/sendall - 群发所有用户
+/send - 发送指定用户
+/sendunblock - 发送未屏蔽用户
+
+💡 <b>使用示例</b>
+• 回复消息: 直接回复转发的消息
+• 查看用户: /kk 123456789 987654321
+• 屏蔽用户: /block 123456789 987654321
+• 群发消息: /send 123456789,987654321 这是群发消息
+
+⚠️ <b>注意事项</b>
+• 查看/屏蔽类命令使用空格分隔多ID
+  示例: /block 123456 789012
+• 发送类命令使用逗号分隔多ID
+  示例: /send 123456,789012 消息内容
+• 系统自动检测可疑用户
+• 所有操作均有详细记录
+
+🔔 <b>使用建议</b>
+• 定期检查可疑用户提醒
+• 合理使用群发功能
+• 保持命令格式规范
+• 及时处理用户反馈
+
+🔗 <b>项目地址</b>
+• GitHub: <a href="https://github.com/misak10/nfd">misak10/nfd</a>
+`,
+
+  startGuest: () => `
+🎉 <b>欢迎使用机器人</b>
+━━━━━━━━━━━━━━━━
+您可以:
+
+1️⃣ 发送任何消息给管理员
+2️⃣ 使用 /info 查看个人信息
+
+<i>💡 提示: 管理员会尽快回复您的消息</i>`,
 }
 
 const handleError = (error, chatId) => {
@@ -271,18 +329,15 @@ async function onUpdate (update) {
 async function onMessage (message) {
   try {
     if(message.text === '/start'){
-      let startMsg
-      if(message.chat.id.toString() === ADMIN_UID) {
-        startMsg = await fetch(startMsgUrl.admin).then(r => r.text())
+      const isAdmin = message.chat.id.toString() === ADMIN_UID
+      if(isAdmin) {
         await setCommands()
-      } else {
-        startMsg = await fetch(startMsgUrl.guest).then(r => r.text())
       }
       
       return sendMessage({
         chat_id: message.chat.id,
-        text: startMsg,
-        parse_mode: 'Markdown'
+        text: isAdmin ? templates.startAdmin() : templates.startGuest(),
+        parse_mode: 'HTML'
       })
     }
 
@@ -632,9 +687,11 @@ async function handleKK(message, userIds = null) {
         const userInfo = await getChat(id)
         if(userInfo.ok) {
           const photos = await getUserProfilePhotos(id)
+          const isBlocked = await nfd.get('isblocked-' + id, { type: "json" })
           userInfos.push({
             info: userInfo.result,
-            photo: photos.ok && photos.result.total_count > 0 ? photos.result.photos[0][0].file_id : null
+            photo: photos.ok && photos.result.total_count > 0 ? photos.result.photos[0][0].file_id : null,
+            isBlocked: isBlocked || false
           })
         }
       } catch(error) {
@@ -655,13 +712,13 @@ async function handleKK(message, userIds = null) {
         await sendPhoto({
           chat_id: ADMIN_UID,
           photo: user.photo,
-          caption: templates.userInfo(user.info),
+          caption: templates.userInfo(user.info, user.isBlocked),
           parse_mode: 'HTML'
         })
       } else {
         await sendMessage({
           chat_id: ADMIN_UID,
-          text: templates.userInfo(user.info),
+          text: templates.userInfo(user.info, user.isBlocked),
           parse_mode: 'HTML'
         })
       }
@@ -686,7 +743,7 @@ async function handleSendAll(message, args) {
   if(!args || args.length === 0) {
     return sendMessage({
       chat_id: ADMIN_UID,
-      text: '❌ 请提供要发送的消��内容',
+      text: '❌ 请提供要发送的消息内容',
       parse_mode: 'HTML'
     })
   }
