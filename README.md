@@ -53,7 +53,7 @@
 6. 创建并绑定 KV 命名空间：
    - 创建名为 `nfd` 的 KV 命名空间
    - 在 Settings -> Variables 中绑定 KV
-7. 复制代码到 Worker
+7. 复制[worker.js](./src/worker.js)代码到 Worker
 8. 访问 `https://your-worker.workers.dev/registerWebhook` 注册 Webhook
 
 ## 使用说明
