@@ -41,22 +41,14 @@ const templates = {
 <i>❗️注意: /block、/unblock、/checkblock、/kk 可以回复消息或直接输入用户ID</i>
 `,
 
-  userInfo: (user, isBlocked = false) => `📌 基本信息
+  userInfo: (user, isBlocked = false, botBlocked = false) => `📌 基本信息
 ┣ 昵称: <b>${user.first_name}${user.last_name ? ' ' + user.last_name : ''}</b>
 ┣ 用户名: ${user.username ? '@' + user.username : '未设置'}
 ┣ ID: <code>${user.id}</code>
-┗ 状态: ${isBlocked ? '🚫 已屏蔽' : '✅ 正常'}
+┣ 状态: ${isBlocked ? '🚫 已屏蔽' : '✅ 正常'}
+┗ Bot状态: ${botBlocked ? '🚫 已屏蔽Bot' : '✅ 正常'}
 
 ⏰ 查询时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`,
-
-  fraudDetected: (id) => `
-⚠️ <b>检测到可疑用户</b>
-━━━━━━━━━━━━━━━
-🚫 用户ID: <code>${id}</code>
-⏰ 时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
-
-<i>❗️建议注意此用户的行为</i>
-`,
 
   blocked: (users) => `
 ✅ <b>用户已被屏蔽</b>
@@ -95,16 +87,22 @@ ${users.length ? users.map(user => `👤 昵称: <b>${user.first_name}${user.las
 ⏰ 查询时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
 `,
 
-  messageSent: (type, users) => `
-✅ <b>消息发送完成</b>
+  messageSent: (type, users, failed = []) => `
+<b>${failed.length > 0 ? '❌ 消息发送失败' : '✅ 消息发送成功'}</b>
 ━━━━━━━━━━━━━━━━
 📨 发送类型: ${type}
 📊 发送数量: ${users.length}条
 
-📝 发送详情:
-${users.map(user => `👤 昵称: <b>${user.first_name}${user.last_name ? ' ' + user.last_name : ''}</b>
+${users.map(user => 
+  `👤 昵称: <b>${user.first_name}${user.last_name ? ' ' + user.last_name : ''}</b>
 🔖 用户名: ${user.username ? '@' + user.username : '未设置'}
 🆔 ID: <code>${user.id}</code>`).join('\n\n')}
+
+${failed.map(user => 
+  `👤 昵称: <b>${user.first_name}${user.last_name ? ' ' + user.last_name : ''}</b>
+🔖 用户名: ${user.username ? '@' + user.username : '未设置'}
+🆔 ID: <code>${user.id}</code>
+⚠️ 原因: ${user.error}`).join('\n\n')}
 
 ⏰ 发送时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
 `,
@@ -422,12 +420,64 @@ async function handleAdminMessage(message) {
   }
 
   if(message?.reply_to_message?.chat) {
-    let guestChantId = await nfd.get('msg-map-' + message?.reply_to_message.message_id, { type: "json" })
-    return copyMessage({
-      chat_id: guestChantId,
-      from_chat_id: message.chat.id,
-      message_id: message.message_id,
-    })
+    let guestChatId = await nfd.get('msg-map-' + message?.reply_to_message.message_id, { type: "json" })
+    
+    try {
+      const userInfo = await getChat(guestChatId)
+      if(!userInfo.ok) {
+        return sendMessage({
+          chat_id: ADMIN_UID,
+          text: '❌ 无法获取用户信息',
+          parse_mode: 'HTML'
+        })
+      }
+
+      const canAccess = await checkBotAccess(guestChatId)
+      if(!canAccess) {
+        return sendMessage({
+          chat_id: ADMIN_UID,
+          text: templates.messageSent('回复消息', [], [{
+            ...userInfo.result,
+            error: '用户已屏蔽机器人'
+          }]),
+          parse_mode: 'HTML'
+        })
+      }
+
+      const result = await copyMessage({
+        chat_id: guestChatId,
+        from_chat_id: message.chat.id,
+        message_id: message.message_id,
+      })
+
+      if(result.ok) {
+        return
+      } else {
+        return sendMessage({
+          chat_id: ADMIN_UID,
+          text: templates.messageSent('回复消息', [], [{
+            ...userInfo.result,
+            error: '发送失败'
+          }]),
+          parse_mode: 'HTML'
+        })
+      }
+    } catch(error) {
+      if(error.message.includes('bot was blocked') || error.message.includes('chat not found')) {
+        const userInfo = await getChat(guestChatId)
+        if(userInfo.ok) {
+          return sendMessage({
+            chat_id: ADMIN_UID,
+            text: templates.messageSent('回复消息', [], [{
+              ...userInfo.result,
+              error: '用户已屏蔽机器人'
+            }]),
+            parse_mode: 'HTML'
+          })
+        }
+      }
+      return handleError(error, ADMIN_UID)
+    }
   }
 
   return sendMessage({
@@ -467,21 +517,6 @@ async function handleGuestMessage(message) {
     }
   } catch (error) {
     return handleError(error, chatId)
-  }
-}
-
-async function handleNotify(message){
-  let chatId = message.chat.id;
-  
-  if(await isFraud(chatId)){
-    return notifyAdmin(templates.fraudDetected(chatId))
-  }
-  
-  if(enable_notification){
-    let lastMsgTime = await nfd.get('lastmsg-' + chatId, { type: "json" })
-    if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL){
-      await nfd.put('lastmsg-' + chatId, Date.now())
-    }
   }
 }
 
@@ -575,7 +610,6 @@ async function handleUnBlock(message, userIds = null) {
         const userInfo = await getChat(id)
         if(!userInfo.ok) continue
 
-        // 直接设置 KV 状态为 false
         await nfd.put('isblocked-' + id, false)
         results.push(userInfo.result)
       } catch(error) {
@@ -688,10 +722,13 @@ async function handleKK(message, userIds = null) {
         if(userInfo.ok) {
           const photos = await getUserProfilePhotos(id)
           const isBlocked = await nfd.get('isblocked-' + id, { type: "json" })
+          const botBlocked = await checkBotBlockedByMessage(id)
+          
           userInfos.push({
             info: userInfo.result,
             photo: photos.ok && photos.result.total_count > 0 ? photos.result.photos[0][0].file_id : null,
-            isBlocked: isBlocked || false
+            isBlocked: isBlocked || false,
+            botBlocked: botBlocked
           })
         }
       } catch(error) {
@@ -712,13 +749,13 @@ async function handleKK(message, userIds = null) {
         await sendPhoto({
           chat_id: ADMIN_UID,
           photo: user.photo,
-          caption: templates.userInfo(user.info, user.isBlocked),
+          caption: templates.userInfo(user.info, user.isBlocked, user.botBlocked),
           parse_mode: 'HTML'
         })
       } else {
         await sendMessage({
           chat_id: ADMIN_UID,
-          text: templates.userInfo(user.info, user.isBlocked),
+          text: templates.userInfo(user.info, user.isBlocked, user.botBlocked),
           parse_mode: 'HTML'
         })
       }
@@ -786,24 +823,53 @@ async function handleSend(message, args) {
   const userIds = args[0].split(',')
   const content = args.slice(1).join(' ')
   const sentUsers = []
+  const failedUsers = []
 
   for(const userId of userIds) {
     try {
       const userInfo = await getChat(userId)
       if(userInfo.ok) {
-        await sendMessage({
+        const canAccess = await checkBotAccess(userId)
+        if(!canAccess) {
+          failedUsers.push({
+            ...userInfo.result,
+            error: '用户已屏蔽机器人'
+          })
+          continue
+        }
+
+        const result = await sendMessage({
           chat_id: userId,
           text: content,
           parse_mode: 'HTML'
         })
-        sentUsers.push(userInfo.result)
+
+        if(result.ok) {
+          sentUsers.push(userInfo.result)
+        } else {
+          failedUsers.push({
+            ...userInfo.result,
+            error: '发送失败'
+          })
+        }
       }
     } catch (error) {
       console.error(`发送消息失败 ${userId}:`, error)
+      try {
+        const userInfo = await getChat(userId)
+        if(userInfo.ok) {
+          failedUsers.push({
+            ...userInfo.result,
+            error: error.message.includes('bot was blocked') ? '用户已屏蔽机器人' : '发送失败'
+          })
+        }
+      } catch(e) {
+        console.error(`获取用户信息失败 ${userId}:`, e)
+      }
     }
   }
 
-  return notifyAdmin(templates.messageSent('指定用户', sentUsers))
+  return notifyAdmin(templates.messageSent('指定用户', sentUsers, failedUsers))
 }
 
 async function handleSendUnblock(message, args) {
@@ -877,4 +943,39 @@ async function unRegisterWebhook (event) {
 
 function sendPhoto(msg = {}) {
   return requestTelegram('sendPhoto', makeReqBody(msg))
+}
+
+async function checkBotAccess(chatId) {
+  try {
+    const chatInfo = await getChat(chatId)
+    return chatInfo.ok
+  } catch(error) {
+    if(error.message.includes('bot was blocked') || error.message.includes('chat not found')) {
+      return false
+    }
+    throw error
+  }
+}
+
+async function checkBotBlockedByMessage(chatId) {
+  try {
+    const testMsg = await sendMessage({
+      chat_id: chatId,
+      text: '🔍'
+    })
+    
+    if(testMsg.ok) {
+      await requestTelegram('deleteMessage', makeReqBody({
+        chat_id: chatId,
+        message_id: testMsg.result.message_id
+      }))
+      return false
+    }
+    return true
+  } catch(error) {
+    if(error.message.includes('bot was blocked') || error.message.includes('chat not found')) {
+      return true
+    }
+    throw error
+  }
 }
