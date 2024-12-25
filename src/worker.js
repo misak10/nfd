@@ -14,7 +14,8 @@ const commands = {
     {command: 'info', description: '查看自己的信息'},
     {command: 'sendall', description: '给所有用户发送消息'},
     {command: 'send', description: '给指定用户发送消息'},
-    {command: 'sendunblock', description: '给未屏蔽用户发送消息'}
+    {command: 'sendunblock', description: '给未屏蔽用户发送消息'},
+    {command: 'sendgroup', description: '在指定群组发送消息'}
   ],
   guest: [
     {command: 'start', description: '开始使用机器人'},
@@ -37,8 +38,11 @@ const templates = {
 7️⃣ /send [用户ID1,用户ID2...] [消息内容] - 给指定用户发送消息
 8️⃣ /sendunblock [消息内容] - 给未屏蔽用户发送消息
 9️⃣ /help - 显示此帮助信息
+🔟 /sendgroup [群组ID] [消息内容] - 在指定群组发送消息
 
 <i>❗️注意: /block、/unblock、/checkblock、/kk 可以回复消息或直接输入用户ID</i>
+
+<i>❗️注意: Bot需要是群组成员且拥有发送消息权限</i>
 `,
 
   userInfo: (user, isBlocked = false, botBlocked = false) => `📌 基本信息
@@ -168,25 +172,38 @@ ${failed.map(user =>
 2️⃣ 使用 /info 查看个人信息
 
 <i>💡 提示: 管理员会尽快回复您的消息</i>`,
+
+  groupMessageSent: (group, success = true, error = null) => `
+${success ? '✅ 群组消息发送成功' : '❌ 群组消息发送失败'}
+━━━━━━━━━━━━━━━━
+👥 群组名称: <b>${group.title}</b>
+🆔 群组ID: <code>${group.id}</code>
+${error ? `⚠️ 错误信息: ${error}` : ''}
+⏰ 发送时间: ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
+`,
 }
 
 const handleError = (error, chatId) => {
   console.error('Error:', error)
-  let errorMsg = '⚠️ 系统错误'
   
-  if(error.message.includes('message not found')) {
-    errorMsg = '消息未找到'
-  } else if(error.message.includes('bot was blocked')) {
-    errorMsg = '❌ 机器人已被用户屏蔽'
-  } else if(error.message.includes('chat not found')) {
-    errorMsg = '❌ 找不到该聊天'
-  } else if(error.message.includes('Too Many Requests')) {
-    errorMsg = '⚠️ 请求过于频繁,请稍后再试'
+  const errorMessages = {
+    'message not found': '消息未找到',
+    'bot was blocked': '❌ 机器人已被用户屏蔽',
+    'chat not found': '❌ 找不到该聊天',
+    'Too Many Requests': '⚠️ 请求过于频繁,请稍后再试',
+    'not enough rights': '❌ Bot没有足够的权限',
+    'group chat was upgraded': '❌ 群组已升级为超级群组',
+    'need administrator rights': '❌ 需要管理员权限'
   }
+
+  const errorMsg = Object.entries(errorMessages).find(([key]) => 
+    error.message.includes(key)
+  )?.[1] || '⚠️ 系统错误'
 
   return sendMessage({
     chat_id: chatId,
-    text: errorMsg
+    text: errorMsg,
+    parse_mode: 'HTML'
   })
 }
 
@@ -324,61 +341,137 @@ async function onUpdate (update) {
   }
 }
 
-async function onMessage (message) {
+// 添加消息类型常量
+const MessageType = {
+  COMMAND: 'command',
+  MENTION: 'mention',
+  REPLY: 'reply',
+  NORMAL: 'normal'
+}
+
+// 添加消息处理工具函数
+const messageUtils = {
+  getMessageType(message, botInfo) {
+    if(message.text?.startsWith('/')) return MessageType.COMMAND
+    
+    const isBotMentioned = message.text?.includes('@' + botInfo.username) || 
+                          message.entities?.some(entity => 
+                            entity.type === 'mention' && 
+                            message.text.substring(entity.offset, entity.offset + entity.length) === '@' + botInfo.username
+                          )
+    if(isBotMentioned) return MessageType.MENTION
+    
+    if(message.reply_to_message?.from?.id === botInfo.id) return MessageType.REPLY
+    
+    return MessageType.NORMAL
+  },
+
+  isGroupChat(message) {
+    return message.chat.type === 'group' || message.chat.type === 'supergroup'
+  },
+
+  isAdmin(message) {
+    return message.from.id.toString() === ADMIN_UID
+  },
+
+  getCommand(message) {
+    return message.text?.split('@')[0] // 去掉可能的 @botname
+  }
+}
+
+// 优化 onMessage 函数
+async function onMessage(message) {
   try {
-    if(message.text === '/start'){
-      const isAdmin = message.chat.id.toString() === ADMIN_UID
-      if(isAdmin) {
-        await setCommands()
-      }
-      
-      return sendMessage({
-        chat_id: message.chat.id,
-        text: isAdmin ? templates.startAdmin() : templates.startGuest(),
-        parse_mode: 'HTML'
-      })
+    const botInfo = await requestTelegram('getMe', makeReqBody({}))
+    if(!botInfo.ok) return
+
+    const messageType = messageUtils.getMessageType(message, botInfo.result)
+    const isGroup = messageUtils.isGroupChat(message)
+    const isAdmin = messageUtils.isAdmin(message)
+
+    // 群组消息处理
+    if(isGroup) {
+      if(messageType === MessageType.NORMAL) return
+      return handleGroupMessage(message, messageType, isAdmin)
     }
 
-    if(message.text === '/info'){
-      const userInfo = await getChat(message.chat.id)
-      if(!userInfo.ok) {
+    // 私聊消息处理
+    return handlePrivateMessage(message)
+  } catch(error) {
+    return handleError(error, message.chat.id)
+  }
+}
+
+// 添加群组消息处理函数
+async function handleGroupMessage(message, messageType, isAdmin) {
+  if(messageType === MessageType.COMMAND) {
+    const command = messageUtils.getCommand(message)
+    
+    // 处理基础命令
+    if(command === '/start' || command === '/info') {
+      return handleBasicCommands(message, command, isAdmin)
+    }
+
+    // 处理管理员命令
+    if(Object.values(commands.admin).some(cmd => command === '/' + cmd.command)) {
+      if(!isAdmin) {
         return sendMessage({
           chat_id: message.chat.id,
-          text: '❌ 无法获取用户信息',
+          text: '⚠️ 您没有权限使用此命令',
           parse_mode: 'HTML'
         })
       }
+      return handleAdminMessage(message)
+    }
+  }
 
-      const user = userInfo.result
-      try {
-        const photos = await getUserProfilePhotos(message.chat.id)
-        if(photos.ok && photos.result.total_count > 0) {
-          return sendPhoto({
-            chat_id: message.chat.id,
-            photo: photos.result.photos[0][0].file_id,
-            caption: templates.userInfo(user),
-            parse_mode: 'HTML'
-          })
-        }
-      } catch (error) {
-        console.error('Error getting user photo:', error)
-      }
+  // 处理@bot或回复消息
+  if(messageType === MessageType.MENTION || messageType === MessageType.REPLY) {
+    return handleGuestMessage(message)
+  }
+}
 
+async function handleBasicCommands(message, command, isAdmin) {
+  if(command === '/start') {
+    if(isAdmin) {
+      await setCommands()
+    }
+    return sendMessage({
+      chat_id: message.chat.id,
+      text: isAdmin ? templates.startAdmin() : templates.startGuest(),
+      parse_mode: 'HTML'
+    })
+  }
+
+  if(command === '/info') {
+    const userInfo = await getChat(message.from.id)
+    if(!userInfo.ok) {
       return sendMessage({
         chat_id: message.chat.id,
-        text: templates.userInfo(user),
+        text: '❌ 无法获取用户信息',
         parse_mode: 'HTML'
       })
     }
-
-    if(message.chat.id.toString() === ADMIN_UID){
-      return handleAdminMessage(message)
-    }
-
-    return handleGuestMessage(message)
-  } catch (error) {
-    return handleError(error, message.chat.id)
+    return sendMessage({
+      chat_id: message.chat.id,
+      text: templates.userInfo(userInfo.result),
+      parse_mode: 'HTML'
+    })
   }
+}
+
+async function handlePrivateMessage(message) {
+  const isAdmin = message.chat.id.toString() === ADMIN_UID
+
+  if(message.text === '/start' || message.text === '/info') {
+    return handleBasicCommands(message, message.text, isAdmin)
+  }
+
+  if(isAdmin) {
+    return handleAdminMessage(message)
+  }
+
+  return handleGuestMessage(message)
 }
 
 async function handleAdminMessage(message) {
@@ -399,7 +492,8 @@ async function handleAdminMessage(message) {
     '/kk': handleKK,
     '/sendall': handleSendAll,
     '/send': handleSend,
-    '/sendunblock': handleSendUnblock
+    '/sendunblock': handleSendUnblock,
+    '/sendgroup': handleSendGroup
   }
 
   const handler = commandHandlers[command]
@@ -489,16 +583,20 @@ async function handleAdminMessage(message) {
 
 async function handleGuestMessage(message) {
   const chatId = message.chat.id
+  const fromId = message.from.id
   
   try {
-    const isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
+    // 检查用户是否被封禁
+    const isblocked = await nfd.get('isblocked-' + fromId, { type: "json" })
     if(isblocked) {
       return sendMessage({
         chat_id: chatId,
-        text: '🚫 您已被封禁访问'
+        text: '🚫 您已被封禁访问',
+        reply_to_message_id: message.message_id
       })
     }
 
+    // 转发消息给管理员
     const forwardReq = await forwardMessage({
       chat_id: ADMIN_UID,
       from_chat_id: chatId,
@@ -506,13 +604,27 @@ async function handleGuestMessage(message) {
     })
 
     if(forwardReq.ok) {
+      // 存储消息映射
       await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
       
+      // 更新最后活动时间
       if(enable_notification) {
-        const lastMsgTime = await nfd.get('lastmsg-' + chatId, { type: "json" })
-        if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL) {
-          await nfd.put('lastmsg-' + chatId, Date.now())
+        const lastMsgTime = await nfd.get('lastmsg-' + fromId, { type: "json" })
+        const now = Date.now()
+        if(!lastMsgTime || now - lastMsgTime > NOTIFY_INTERVAL) {
+          await nfd.put('lastmsg-' + fromId, now)
         }
+      }
+
+      // 如果是群组消息，发送提示
+      if(message.chat.type === 'group' || message.chat.type === 'supergroup') {
+        await sendMessage({
+          chat_id: ADMIN_UID,
+          text: `📩 来自群组「${message.chat.title}」的消息\n` +
+                `👤 发送者: ${message.from.first_name}${message.from.last_name ? ' ' + message.from.last_name : ''}\n` +
+                `🆔 用户ID: <code>${message.from.id}</code>`,
+          parse_mode: 'HTML'
+        })
       }
     }
   } catch (error) {
@@ -690,9 +802,9 @@ async function checkBlock(message, userIds = null) {
     const statusText = `
 ℹ️ <b>用户状态查询</b>
 ━━━━━━━━━━━━━━━━
-${results.map(user => `👤 昵称: <b>${user.info.first_name}${user.info.last_name ? ' ' + user.last_name : ''}</b>
+${results.map(user => `👤 昵称: <b>${user.info.first_name}${user.info.last_name ? ' ' + user.info.last_name : ''}</b>
 🔖 用户名: ${user.info.username ? '@' + user.info.username : '未设置'}
-🆔 ID: <code>${user.info.id}</code>
+���� ID: <code>${user.info.id}</code>
 📊 状态: ${user.blocked ? '🚫 已屏蔽' : '✅ 正常'}
 ⏰ 最后活动: ${user.lastActive}`).join('\n\n')}
 
@@ -977,5 +1089,66 @@ async function checkBotBlockedByMessage(chatId) {
       return true
     }
     throw error
+  }
+}
+
+async function handleSendGroup(message, args) {
+  if(args.length < 2) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '❌ 请提供群组ID和消息内容\n\n示例: /sendgroup -123456789 这是要发送的消息',
+      parse_mode: 'HTML'
+    })
+  }
+
+  const groupId = args[0]
+  const content = args.slice(1).join(' ')
+
+  try {
+    // 获取群组信息
+    const groupInfo = await getChat(groupId)
+    if(!groupInfo.ok) {
+      throw new Error('chat not found')
+    }
+
+    // 检查是否为群组
+    if(groupInfo.result.type !== 'group' && groupInfo.result.type !== 'supergroup') {
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text: templates.groupMessageSent(groupInfo.result, false, '指定的ID不是群组'),
+        parse_mode: 'HTML'
+      })
+    }
+
+    // 检查bot权限
+    const botMember = await requestTelegram('getChatMember', makeReqBody({
+      chat_id: groupId,
+      user_id: (await requestTelegram('getMe', makeReqBody({}))).result.id
+    }))
+
+    if(!botMember.ok || botMember.result.status === 'left' || botMember.result.status === 'kicked') {
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text: templates.groupMessageSent(groupInfo.result, false, 'Bot不是群组成员'),
+        parse_mode: 'HTML'
+      })
+    }
+
+    // 发送消息
+    const result = await sendMessage({
+      chat_id: groupId,
+      text: content,
+      parse_mode: 'HTML'
+    })
+
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: templates.groupMessageSent(groupInfo.result, result.ok, result.ok ? null : '发送失败'),
+      parse_mode: 'HTML'
+    })
+
+  } catch(error) {
+    console.error('发送群组消息失败:', error)
+    return handleError(error, ADMIN_UID)
   }
 }
